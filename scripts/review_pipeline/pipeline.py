@@ -9,6 +9,7 @@ from .llm import LLMClient
 from .models import CandidateSpan, Finding, PipelineArtifacts
 from .normalize import normalize_findings
 from .parser import load_document
+from .postprocess import postprocess_findings
 from .prompts import SYSTEM_PROMPT, build_category_prompt, build_merge_prompt
 from .renderer import render_markdown
 from .rules import compile_rules, get_rule_categories
@@ -235,6 +236,7 @@ def review_file(
         artifacts.findings_raw_path = str(findings_raw_path)
 
     merged = dedupe_findings(normalize_findings(findings, profile=profile))
+    merged = postprocess_findings(merged, profile=profile)
 
     if merge_with_llm and merged:
         payload = {"findings": [item.to_dict() for item in merged]}
@@ -244,6 +246,7 @@ def review_file(
             temperature=0.0,
         )
         merged = dedupe_findings(normalize_findings(_parse_findings(merged_payload, source_category="merge"), profile=profile))
+        merged = postprocess_findings(merged, profile=profile)
 
     if debug_dir:
         findings_merged_path = debug_dir / f"{doc.stem}.findings.merged.json"

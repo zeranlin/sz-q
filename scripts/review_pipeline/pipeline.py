@@ -7,6 +7,7 @@ from pathlib import Path
 from .dedupe import dedupe_findings
 from .llm import LLMClient
 from .models import CandidateSpan, Finding, PipelineArtifacts
+from .normalize import normalize_findings
 from .parser import load_document
 from .prompts import SYSTEM_PROMPT, build_category_prompt, build_merge_prompt
 from .renderer import render_markdown
@@ -77,6 +78,48 @@ def _select_spans_for_category(
     return selected
 
 
+def summarize_candidates(candidates: list[CandidateSpan], profile: str, source_path: str) -> dict:
+    by_category: dict[str, dict] = {}
+    for span in candidates:
+        bucket = by_category.setdefault(
+            span.category,
+            {"count": 0, "line_ranges": [], "triggers": [], "preview": []},
+        )
+        bucket["count"] += 1
+        bucket["line_ranges"].append(f"第{span.start_line}行-第{span.end_line}行")
+        if span.trigger not in bucket["triggers"]:
+            bucket["triggers"].append(span.trigger)
+        preview = span.text.splitlines()[:3]
+        snippet = "\n".join(preview)
+        if snippet not in bucket["preview"]:
+            bucket["preview"].append(snippet)
+    return {
+        "profile": profile,
+        "source_path": source_path,
+        "matched_categories": sorted(by_category.keys()),
+        "category_summary": by_category,
+    }
+
+
+def load_candidates_from_debug(debug_dir: Path, stem: str) -> list[CandidateSpan] | None:
+    candidates_path = debug_dir / f"{stem}.candidates.json"
+    if not candidates_path.exists():
+        return None
+    data = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidates: list[CandidateSpan] = []
+    for item in data:
+        candidates.append(
+            CandidateSpan(
+                category=item["category"],
+                start_line=item["start_line"],
+                end_line=item["end_line"],
+                trigger=item["trigger"],
+                text=item["text"],
+            )
+        )
+    return candidates
+
+
 def _parse_findings(payload: dict, source_category: str) -> list[Finding]:
     findings = []
     for item in payload.get("findings", []):
@@ -119,6 +162,8 @@ def review_file(
     category_timeout_sec: int = 90,
     max_spans_per_category: int = 12,
     max_chars_per_category: int = 8000,
+    stage_mode: str = "full",
+    use_existing_candidates: bool = False,
 ) -> PipelineArtifacts:
     doc = load_document(input_path)
     artifacts = PipelineArtifacts()
@@ -129,7 +174,14 @@ def review_file(
         normalized_path.write_text(doc.numbered_text(), encoding="utf-8")
         artifacts.normalized_text_path = str(normalized_path)
 
-    candidates = collect_candidates(doc.lines, profile=profile)
+    candidates: list[CandidateSpan] | None = None
+    if stage_mode == "stage2" and debug_dir:
+        candidates = load_candidates_from_debug(debug_dir, doc.stem)
+        if candidates is None:
+            artifacts.warnings.append("Stage2 fallback: candidates.json not found, regenerated from source text.")
+
+    if candidates is None:
+        candidates = collect_candidates(doc.lines, profile=profile)
     if debug_dir:
         candidates_path = debug_dir / f"{doc.stem}.candidates.json"
         candidates_path.write_text(
@@ -137,6 +189,17 @@ def review_file(
             encoding="utf-8",
         )
         artifacts.candidates_path = str(candidates_path)
+        candidates_summary_path = debug_dir / f"{doc.stem}.candidates.summary.json"
+        candidates_summary_path.write_text(
+            json.dumps(summarize_candidates(candidates, profile=profile, source_path=doc.source_path), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts.candidates_summary_path = str(candidates_summary_path)
+
+    if stage_mode == "stage1":
+        if not candidates:
+            artifacts.warnings.append("No candidate spans were matched by rules.")
+        return artifacts
 
     findings: list[Finding] = []
     for category in get_rule_categories(profile):
@@ -171,7 +234,7 @@ def review_file(
         )
         artifacts.findings_raw_path = str(findings_raw_path)
 
-    merged = dedupe_findings(findings)
+    merged = dedupe_findings(normalize_findings(findings, profile=profile))
 
     if merge_with_llm and merged:
         payload = {"findings": [item.to_dict() for item in merged]}
@@ -180,7 +243,7 @@ def review_file(
             build_merge_prompt(json.dumps(payload, ensure_ascii=False, indent=2)),
             temperature=0.0,
         )
-        merged = dedupe_findings(_parse_findings(merged_payload, source_category="merge"))
+        merged = dedupe_findings(normalize_findings(_parse_findings(merged_payload, source_category="merge"), profile=profile))
 
     if debug_dir:
         findings_merged_path = debug_dir / f"{doc.stem}.findings.merged.json"

@@ -45,8 +45,8 @@ class Finding:
 class PipelineArtifacts:
     normalized_text_path: str | None = None
     candidates_path: str | None = None
+    candidates_summary_path: str | None = None
     findings_raw_path: str | None = None
     findings_merged_path: str | None = None
     markdown_path: str | None = None
     warnings: list[str] = field(default_factory=list)
-

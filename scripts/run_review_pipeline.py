@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Model name, e.g. qwen3.5-27b")
     parser.add_argument("--merge-with-llm", action="store_true", help="Use a second LLM pass to merge findings")
     parser.add_argument("--profile", default="generic", choices=["generic", "furniture"], help="Review profile")
+    parser.add_argument("--stage-mode", default="full", choices=["full", "stage1", "stage2"], help="Run full pipeline, rules-only stage1, or LLM stage2")
     parser.add_argument("--max-workers", type=int, default=1, help="Parallel workers for processing files")
     parser.add_argument("--request-timeout", type=int, default=120, help="Per-request timeout in seconds")
     parser.add_argument("--max-retries", type=int, default=2, help="Retry count for failed LLM requests")
@@ -68,10 +69,13 @@ def main() -> int:
             category_timeout_sec=args.category_timeout_sec,
             max_spans_per_category=args.max_spans_per_category,
             max_chars_per_category=args.max_chars_per_category,
+            stage_mode=args.stage_mode,
         )
         return {
             "input": str(path),
             "markdown": artifacts.markdown_path,
+            "candidates": artifacts.candidates_path,
+            "candidates_summary": artifacts.candidates_summary_path,
             "warnings": artifacts.warnings,
         }
 

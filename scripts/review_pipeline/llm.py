@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import re
 import urllib.error
 import urllib.request
@@ -8,11 +9,21 @@ from typing import Any
 
 
 class LLMClient:
-    def __init__(self, base_url: str, model: str, api_key: str = "", timeout: int = 120) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = "",
+        timeout: int = 120,
+        max_retries: int = 2,
+        retry_backoff_sec: float = 1.5,
+    ) -> None:
         self.base_url = self._normalize_base_url(base_url)
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_sec = retry_backoff_sec
 
     @staticmethod
     def _normalize_base_url(base_url: str) -> str:
@@ -43,16 +54,26 @@ class LLMClient:
             },
         )
 
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"LLM HTTP error {exc.code}: {detail}") from exc
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    raw = response.read().decode("utf-8")
+                data = json.loads(raw)
+                try:
+                    content = data["choices"][0]["message"]["content"]
+                except (KeyError, IndexError) as exc:
+                    raise RuntimeError(f"Unexpected LLM response: {raw}") from exc
+                return json.loads(content)
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="ignore")
+                last_error = RuntimeError(f"LLM HTTP error {exc.code}: {detail}")
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+                last_error = exc
 
-        data = json.loads(raw)
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
-            raise RuntimeError(f"Unexpected LLM response: {raw}") from exc
-        return json.loads(content)
+            if attempt < self.max_retries:
+                time.sleep(self.retry_backoff_sec * (attempt + 1))
+
+        if last_error is None:
+            raise RuntimeError("LLM request failed without a captured exception.")
+        raise RuntimeError(f"LLM request failed after retries: {last_error}") from last_error

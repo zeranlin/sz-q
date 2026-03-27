@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Iterable
 
 
 LEGAL_BASIS_POOL = [
@@ -131,10 +132,122 @@ RULE_CATEGORIES: list[RuleCategory] = [
 ]
 
 
-def compile_rules() -> list[tuple[RuleCategory, re.Pattern[str]]]:
-    compiled: list[tuple[RuleCategory, re.Pattern[str]]] = []
+FURNITURE_RULE_ENHANCEMENTS: dict[str, tuple[str, ...]] = {
+    "relevance": (
+        r"最基础生产设备|主要生产设备|具备以下生产设备",
+        r"设备实物照片|设备购买合同|租赁设备",
+        r"社会责任管理体系|企业标准化管理体系|创新评价体系",
+        r"家具定制服务认证|家具防火阻燃质量等级认证",
+        r"售后服务高级管理师",
+    ),
+    "qualification": (
+        r"同一品牌",
+        r"只接受直接授权",
+        r"不接受逐级授权",
+        r"境内.*保税库",
+        r"零配件.*保税库",
+    ),
+    "performance": (
+        r"办公家具类同类业绩|实验台类业绩|学生宿舍家具",
+        r"项目发票|不少于30%的项目发票",
+        r"完工项目",
+    ),
+    "certification": (
+        r"中国环保产品认证|环保卫士认证",
+        r"售后服务认证证书",
+        r"五星级",
+        r"GREENGUARD|人类工效学产品认证",
+        r"低VOCS家具产品认证|产品健康认证证书|家具耐久性质量认证证书",
+    ),
+    "testing": (
+        r"检测报告委托单位须为投标人",
+        r"本单位关于《",
+        r"检测报告须包含本项参数的全部内容",
+        r"全国认证认可信息公共服务平台",
+        r"认e云",
+        r"固定时间.*检测报告|202[0-9]年.*检测报告",
+    ),
+    "sample": (
+        r"样品材质|制作工艺|合理精美|美观度|质感",
+        r"优评分标准|良评分标准|中评分标准|差评分标准",
+        r"不提供样品不得分|样品不全.*不得分",
+        r"现场演示人员|样品递交签到",
+    ),
+    "technical_bias": (
+        r"优质进口品牌胶粘剂|优质品牌阻尼铰链",
+        r"公寓组合床与宿舍椅要求为同一品牌",
+        r"优质进口品牌",
+    ),
+    "template": (
+        r"扣？分",
+        r"\*\*\*设备",
+        r"20XX",
+        r"示例",
+    ),
+}
+
+
+PROFILE_PROMPT_HINTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "furniture": {
+        "relevance": (
+            "重点警惕把生产设备、体系认证、星级服务认证、软件著作权等作为评分项。",
+            "家具项目通常更应关注成品质量、环保性能、交付安装和售后响应，而不是企业证书储备。",
+        ),
+        "performance": (
+            "重点警惕要求提供中标通知书、合同、验收报告、发票同时齐备的高证明门槛。",
+        ),
+        "certification": (
+            "重点识别家具类项目中大量 ISO、环保、绿色、五星级、工效学、创新类证书叠加评分。",
+        ),
+        "testing": (
+            "重点识别原材料和成品检测报告前置化、要求同时具备 CMA 和 CNAS、限定委托单位为投标人、限定固定时间区间。",
+        ),
+        "sample": (
+            "重点识别样品以美观、精美、质感、优良中差等主观词评分，或要求不提供样品不得分。",
+        ),
+        "technical_bias": (
+            "重点识别进口品牌、同一品牌绑定、原材料品牌偏好等倾向性表述。",
+        ),
+        "template": (
+            "重点识别家具模板中残留的示例、xx、20XX、扣？分、***设备等未定稿痕迹。",
+        ),
+    }
+}
+
+
+def _merge_patterns(base: Iterable[str], extra: Iterable[str]) -> tuple[str, ...]:
+    merged: list[str] = []
+    for value in list(base) + list(extra):
+        if value not in merged:
+            merged.append(value)
+    return tuple(merged)
+
+
+def get_rule_categories(profile: str = "generic") -> list[RuleCategory]:
+    if profile != "furniture":
+        return RULE_CATEGORIES
+
+    enhanced: list[RuleCategory] = []
     for category in RULE_CATEGORIES:
+        extra = FURNITURE_RULE_ENHANCEMENTS.get(category.key, ())
+        enhanced.append(
+            RuleCategory(
+                key=category.key,
+                review_type=category.review_type,
+                description=category.description,
+                patterns=_merge_patterns(category.patterns, extra),
+            )
+        )
+    return enhanced
+
+
+def get_profile_prompt_hints(profile: str, category_key: str) -> tuple[str, ...]:
+    return PROFILE_PROMPT_HINTS.get(profile, {}).get(category_key, ())
+
+
+def compile_rules(profile: str = "generic") -> list[tuple[RuleCategory, re.Pattern[str]]]:
+    compiled: list[tuple[RuleCategory, re.Pattern[str]]] = []
+    for category in get_rule_categories(profile):
         for pattern in category.patterns:
             compiled.append((category, re.compile(pattern)))
     return compiled
-

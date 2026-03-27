@@ -3,17 +3,27 @@ from __future__ import annotations
 import json
 
 from .models import CandidateSpan
-from .rules import LEGAL_BASIS_POOL, RuleCategory
+from .rules import LEGAL_BASIS_POOL, RuleCategory, get_profile_prompt_hints
 
 
 SYSTEM_PROMPT = """你是政府采购招标文件合规审查专家。
 
 你的任务不是总结文件，而是识别可能存在的合规风险。
 你必须严格依据给定候选条款判断，不得编造原文，不得输出没有原文支持的结论。
-输出必须是合法 JSON，不要输出 Markdown，不要输出解释性前言。"""
+输出必须是合法 JSON，不要输出 Markdown，不要输出解释性前言。
+
+结论要克制：
+- 有原文证据再判断
+- 不要把普通做法夸大成高风险
+- 同一主旨不要拆成多条重复问题"""
 
 
-def build_category_prompt(category: RuleCategory, spans: list[CandidateSpan], max_findings: int = 8) -> str:
+def build_category_prompt(
+    category: RuleCategory,
+    spans: list[CandidateSpan],
+    profile: str = "generic",
+    max_findings: int = 8,
+) -> str:
     span_blocks = []
     for idx, span in enumerate(spans, start=1):
         span_blocks.append(
@@ -24,6 +34,11 @@ def build_category_prompt(category: RuleCategory, spans: list[CandidateSpan], ma
                 "text": span.text,
             }
         )
+
+    profile_hints = get_profile_prompt_hints(profile, category.key)
+    profile_hint_text = ""
+    if profile_hints:
+        profile_hint_text = "本轮专项提示：\n" + "\n".join(f"- {hint}" for hint in profile_hints) + "\n\n"
 
     schema = {
         "findings": [
@@ -42,8 +57,9 @@ def build_category_prompt(category: RuleCategory, spans: list[CandidateSpan], ma
     return f"""本轮只审查：{category.review_type}
 
 审查目标：{category.description}
+审查场景：{profile}
 
-请在候选条款中识别真正值得输出的问题。没有风险的问题不要输出。
+{profile_hint_text}请在候选条款中识别真正值得输出的问题。没有风险的问题不要输出。
 
 高风险通常指：
 - 明显限制竞争
@@ -57,6 +73,13 @@ def build_category_prompt(category: RuleCategory, spans: list[CandidateSpan], ma
 - 条款表达存在争议空间
 
 低风险仅在确有必要时输出，否则宁可不写。
+
+输出要求：
+- 标题要短，尽量归纳为一个可复用问题名
+- line_refs 只写具体行号，不写区间
+- quotes 只保留最关键的 1 到 4 条原文
+- reason 要直接说明为什么会限制竞争、量化不足或与采购需求不匹配
+- legal_basis 只能从法条池中选择 1 到 3 条
 
 可选法律依据只能从以下列表中选择：
 {json.dumps(LEGAL_BASIS_POOL, ensure_ascii=False, indent=2)}
@@ -84,4 +107,3 @@ def build_merge_prompt(findings_json: str) -> str:
 待合并结果：
 {findings_json}
 """
-

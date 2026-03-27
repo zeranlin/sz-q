@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from .models import CandidateSpan, Finding, PipelineArtifacts
 from .parser import load_document
 from .prompts import SYSTEM_PROMPT, build_category_prompt, build_merge_prompt
 from .renderer import render_markdown
-from .rules import RULE_CATEGORIES, compile_rules
+from .rules import compile_rules, get_rule_categories
 
 
 def _merge_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -26,8 +27,8 @@ def _merge_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def collect_candidates(lines: list[str], context: int = 2) -> list[CandidateSpan]:
-    compiled = compile_rules()
+def collect_candidates(lines: list[str], profile: str = "generic", context: int = 2) -> list[CandidateSpan]:
+    compiled = compile_rules(profile)
     by_category: dict[str, dict[str, list]] = {}
     for category, pattern in compiled:
         for idx, line in enumerate(lines, start=1):
@@ -58,6 +59,24 @@ def collect_candidates(lines: list[str], context: int = 2) -> list[CandidateSpan
     return spans
 
 
+def _select_spans_for_category(
+    spans: list[CandidateSpan],
+    max_spans: int = 12,
+    max_chars: int = 8000,
+) -> list[CandidateSpan]:
+    selected: list[CandidateSpan] = []
+    total_chars = 0
+    for span in spans:
+        if len(selected) >= max_spans:
+            break
+        span_chars = len(span.text)
+        if selected and total_chars + span_chars > max_chars:
+            break
+        selected.append(span)
+        total_chars += span_chars
+    return selected
+
+
 def _parse_findings(payload: dict, source_category: str) -> list[Finding]:
     findings = []
     for item in payload.get("findings", []):
@@ -79,12 +98,27 @@ def _parse_findings(payload: dict, source_category: str) -> list[Finding]:
     return findings
 
 
+def _review_category(
+    client: LLMClient,
+    category,
+    spans: list[CandidateSpan],
+    profile: str,
+) -> list[Finding]:
+    prompt = build_category_prompt(category, spans, profile=profile)
+    payload = client.chat_json(SYSTEM_PROMPT, prompt, temperature=0.1)
+    return _parse_findings(payload, source_category=category.key)
+
+
 def review_file(
     input_path: Path,
     output_dir: Path,
     client: LLMClient,
     debug_dir: Path | None = None,
     merge_with_llm: bool = False,
+    profile: str = "generic",
+    category_timeout_sec: int = 90,
+    max_spans_per_category: int = 12,
+    max_chars_per_category: int = 8000,
 ) -> PipelineArtifacts:
     doc = load_document(input_path)
     artifacts = PipelineArtifacts()
@@ -95,7 +129,7 @@ def review_file(
         normalized_path.write_text(doc.numbered_text(), encoding="utf-8")
         artifacts.normalized_text_path = str(normalized_path)
 
-    candidates = collect_candidates(doc.lines)
+    candidates = collect_candidates(doc.lines, profile=profile)
     if debug_dir:
         candidates_path = debug_dir / f"{doc.stem}.candidates.json"
         candidates_path.write_text(
@@ -105,13 +139,29 @@ def review_file(
         artifacts.candidates_path = str(candidates_path)
 
     findings: list[Finding] = []
-    for category in RULE_CATEGORIES:
+    for category in get_rule_categories(profile):
         spans = [span for span in candidates if span.category == category.key]
         if not spans:
             continue
-        prompt = build_category_prompt(category, spans)
-        payload = client.chat_json(SYSTEM_PROMPT, prompt, temperature=0.1)
-        findings.extend(_parse_findings(payload, source_category=category.key))
+        selected_spans = _select_spans_for_category(
+            spans,
+            max_spans=max_spans_per_category,
+            max_chars=max_chars_per_category,
+        )
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(_review_category, client, category, selected_spans, profile)
+            findings.extend(future.result(timeout=category_timeout_sec))
+        except concurrent.futures.TimeoutError:
+            artifacts.warnings.append(
+                f"Category timeout: {category.review_type} exceeded {category_timeout_sec}s and was skipped."
+            )
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:
+            artifacts.warnings.append(f"Category failed: {category.review_type}: {exc}")
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True, cancel_futures=False)
 
     if debug_dir:
         findings_raw_path = debug_dir / f"{doc.stem}.findings.raw.json"
@@ -152,4 +202,3 @@ def review_file(
         artifacts.warnings.append("No findings were produced after model review.")
 
     return artifacts
-

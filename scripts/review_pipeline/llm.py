@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any
@@ -8,10 +9,17 @@ from typing import Any
 
 class LLMClient:
     def __init__(self, base_url: str, model: str, api_key: str = "", timeout: int = 120) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self._normalize_base_url(base_url)
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+
+    @staticmethod
+    def _normalize_base_url(base_url: str) -> str:
+        normalized = base_url.strip()
+        if not re.match(r"^https?://", normalized, flags=re.IGNORECASE):
+            normalized = f"http://{normalized}"
+        return normalized.rstrip("/")
 
     def chat_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.1) -> dict[str, Any]:
         payload = {
@@ -48,4 +56,3 @@ class LLMClient:
         except (KeyError, IndexError) as exc:
             raise RuntimeError(f"Unexpected LLM response: {raw}") from exc
         return json.loads(content)
-
